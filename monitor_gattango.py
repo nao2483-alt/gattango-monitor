@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from datetime import datetime
@@ -6,11 +7,34 @@ from playwright.sync_api import sync_playwright
 
 # ================= 設定項目 =================
 TARGET_URL = "https://rail-mtb.resv.jp/reserve/calendar.php?direct_id=8"
-TARGET_DATES = ["11/12", "11/13", "11/5"]  # テスト用に 11/5 を含めています
+TARGET_DATES = ["11/12", "11/13"]  # 本番用（11/12・11/13のみ監視）
+STATE_FILE = "notified_slots.json"  # 通知済み枠の記録ファイル
 
 # GitHub SecretsからLINEのトークンを取得
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 # ============================================
+
+
+def load_previous_slots() -> list[str]:
+    """前回までに検知・通知した空き枠リストを読み込む"""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            print(f"[WARN] 状態ファイルの読み込みに失敗しました: {e}")
+    return []
+
+
+def save_current_slots(slots: list[str]):
+    """現在空いている枠リストをファイルに保存する"""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(slots, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] 状態ファイルの保存に失敗しました: {e}")
 
 
 def send_line_notification(available_slots: list[str]):
@@ -20,7 +44,7 @@ def send_line_notification(available_slots: list[str]):
     message = (
         f"🚲 【Gattan Go!! 渓谷コース】空き枠が出ました！\n"
         f"検知時刻: {now_str}\n\n"
-        f"【空き枠詳細】\n{slot_text}\n\n"
+        f"【新規空き枠詳細】\n{slot_text}\n\n"
         f"▼ 今すぐ予約ページへ\n{TARGET_URL}"
     )
     print("\n" + "=" * 50)
@@ -95,7 +119,6 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
             }
 
             for (const t of targets) {
-                // "11/5", "11/05", "11月5日" または11月表示中の "5(木)", "5日(木)" などにマッチ
                 const regexFull = new RegExp(`(?:^|\\D)0?${t.m}[\\/月]0?${t.d}(?:日|\\D|$)`);
                 const regexDayOnly = new RegExp(`^0?${t.d}(?:日)?\\s*[\\(（][月火水木金土日][\\)）]`);
 
@@ -123,12 +146,10 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
                 if (rect.width === 0 || rect.height === 0) continue;
 
                 const centerX = (rect.left + rect.right) / 2;
-                // 見出しより下にあり、横位置がその日付の列に収まっているセル
                 if (rect.top >= col.bottom - 5 && centerX >= col.left - 5 && centerX <= col.right + 5) {
                     const cellText = (cell.innerText || "").trim().replace(/\\s+/g, " ");
                     if (!cellText || cellText.length > 35) continue;
 
-                    // 満席（×や－など）は除外
                     if (/^[×✕xX－\\-休満問]+$/.test(cellText) || cellText.includes("満席") || cellText.includes("終了")) {
                         continue;
                     }
@@ -154,7 +175,7 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
             }
         }
 
-        // 3. リンクのURLやonclick属性に日付(20261105や2026-11-05)が直接入っている場合の予備検出
+        // 3. リンクのURLやonclick属性に日付が直接入っている場合の予備検出
         const links = Array.from(document.querySelectorAll("a, [onclick]"));
         for (const link of links) {
             const attrText = (link.getAttribute("href") || "") + " " + (link.getAttribute("onclick") || "") + " " + (link.innerText || "");
@@ -182,10 +203,11 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
     return result["found"], result["debugHeaders"], result["matchedDates"]
 
 
-def check_availability() -> list[str]:
-    """Playwrightでカレンダーを開き、対象日の空き枠リストを返す"""
+def check_availability() -> tuple[list[str], bool]:
+    """Playwrightでカレンダーを開き、(空き枠リスト, 正常取得できたか) を返す"""
     found_slots = []
     seen_target_dates = set()
+    is_success = False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -198,7 +220,7 @@ def check_availability() -> list[str]:
         try:
             page.goto(TARGET_URL, timeout=30000)
             page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(3000)  # カレンダー表の描画完了をしっかり待つ
+            page.wait_for_timeout(3000)
 
             for week_idx in range(4):
                 slots, debug_headers, matched_dates = extract_slots_from_page(page, TARGET_DATES)
@@ -210,11 +232,10 @@ def check_availability() -> list[str]:
 
                 seen_target_dates.update(matched_dates)
 
-                # 監視したい日付をすべて確認できたらループ終了
                 if all(d in seen_target_dates for d in TARGET_DATES):
+                    is_success = True
                     break
 
-                # 「翌週」「次週」「次の週」などのボタンを探してクリック
                 next_btn = page.locator(
                     "a:has-text('翌週'), a:has-text('次週'), a:has-text('次の週'), "
                     "a:has-text('次の7日'), a:has-text('翌7日'), a:has-text('次へ'), "
@@ -231,25 +252,43 @@ def check_availability() -> list[str]:
                     print("[DEBUG] 次週へ進むボタンが見つからないため移動を終了します。")
                     break
 
+            if seen_target_dates:
+                is_success = True
+
         except Exception as e:
             print(f"[ERROR] スクレイピング中にエラーが発生しました: {e}")
         finally:
             browser.close()
 
-    return found_slots
+    return found_slots, is_success
 
 
 def main():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now_str}] 空き状況を確認中... (対象日: {', '.join(TARGET_DATES)})")
 
-    available = check_availability()
+    previous_slots = load_previous_slots()
+    current_slots, is_success = check_availability()
 
-    if available:
-        print(f"[INFO] 空き枠を {len(available)} 件検知しました！")
-        send_line_notification(available)
+    if not is_success:
+        print("[WARN] カレンダーの取得が完了しなかったため、状態ファイルの更新をスキップします。")
+        return
+
+    # 前回はなかった「新規の空き枠」だけを抽出
+    new_slots = [s for s in current_slots if s not in previous_slots]
+
+    if new_slots:
+        print(f"[INFO] 新規の空き枠を {len(new_slots)} 件検知しました！LINE通知を送信します。")
+        send_line_notification(new_slots)
+    elif current_slots:
+        print(f"[INFO] 現在も空き枠がありますが、既に通知済みのためLINE送信をスキップしました: {current_slots}")
     else:
         print(f"[{now_str}] 対象日の空き枠はありませんでした。")
+
+    # 状態に変化があった場合のみファイルを書き換える
+    if set(current_slots) != set(previous_slots):
+        save_current_slots(current_slots)
+        print(f"[INFO] 通知済み状態ファイルを更新しました: {current_slots}")
 
 
 if __name__ == "__main__":
