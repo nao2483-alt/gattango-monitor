@@ -2,9 +2,8 @@ name: Gattan Go Vacancy Monitor
 
 on:
   schedule:
-    # 5分おきに実行（UTC指定ですが5分間隔なので日本時間でも5分おきに動きます）
     - cron: '*/5 * * * *'
-  workflow_dispatch: # GitHubの画面から手動テスト実行できるようにする設定
+  workflow_dispatch:
 
 jobs:
   check_vacancy:
@@ -49,15 +48,13 @@ jobs:
         if: steps.check_date.outputs.skip == 'false' && steps.playwright-cache.outputs.cache-hit != 'true'
         run: playwright install --with-deps chromium
 
-      - name: PlaywrightのOS依存パッケージのみインストール（キャッシュヒット時）
+      - name: PlaywrightのOS依存パッケージのみインストール
         if: steps.check_date.outputs.skip == 'false' && steps.playwright-cache.outputs.cache-hit == 'true'
         run: playwright install-deps chromium
 
       - name: 空席監視スクリプトの実行
         if: steps.check_date.outputs.skip == 'false'
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           TZ: 'Asia/Tokyo'
         run: python monitor_gattango.py
