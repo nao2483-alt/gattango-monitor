@@ -1,7 +1,5 @@
 import os
 import re
-import smtplib
-from email.mime.text import MIMEText
 from datetime import datetime
 import requests
 from playwright.sync_api import sync_playwright
@@ -10,15 +8,13 @@ from playwright.sync_api import sync_playwright
 TARGET_URL = "https://rail-mtb.resv.jp/reserve/calendar.php?direct_id=8"
 TARGET_DATES = ["11/12", "11/13"]  # 監視したい日付
 
-# GitHub Secrets（環境変数）から通知設定を取得
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
-GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+# GitHub SecretsからLINEのトークンを取得
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 # ============================================
 
 
-def send_notification(available_slots: list[str]):
-    """空きが見つかった際に通知を送信する"""
+def send_line_notification(available_slots: list[str]):
+    """空きが見つかった際にLINEへ通知を送信する"""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     slot_text = "\n".join([f"・{slot}" for slot in available_slots])
     message = (
@@ -31,28 +27,32 @@ def send_notification(available_slots: list[str]):
     print(message)
     print("=" * 50 + "\n")
 
-    # 1. Discord通知
-    if DISCORD_WEBHOOK_URL:
-        try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10)
-            print("[INFO] Discordへ通知を送信しました。")
-        except Exception as e:
-            print(f"[ERROR] Discord通知エラー: {e}")
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        print("[WARN] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
+        return
 
-    # 2. メール通知 (Gmail)
-    if GMAIL_ADDRESS and GMAIL_APP_PASSWORD:
-        try:
-            msg = MIMEText(message, "plain", "utf-8")
-            msg["Subject"] = "【空席通知】Gattan Go!! 11/12・13に空きが出ました！"
-            msg["From"] = GMAIL_ADDRESS
-            msg["To"] = GMAIL_ADDRESS
+    url = "https://api.line.me/v2/bot/message/broadcast"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+    }
+    payload = {
+        "messages": [
+            {
+                "type": "text",
+                "text": message,
+            }
+        ]
+    }
 
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-                server.send_message(msg)
-            print("[INFO] メール通知を送信しました。")
-        except Exception as e:
-            print(f"[ERROR] メール送信エラー: {e}")
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        if res.status_code == 200:
+            print("[INFO] LINEへ通知を送信しました。")
+        else:
+            print(f"[ERROR] LINE通知エラー: {res.status_code} {res.text}")
+    except Exception as e:
+        print(f"[ERROR] LINE通信エラー: {e}")
 
 
 def check_availability() -> list[str]:
@@ -110,7 +110,7 @@ def main():
     available = check_availability()
 
     if available:
-        send_notification(available)
+        send_line_notification(available)
     else:
         print(f"[{now_str}] 11/12・13の空き枠はありませんでした。")
 
