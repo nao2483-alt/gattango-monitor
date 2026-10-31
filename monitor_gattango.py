@@ -6,7 +6,7 @@ from playwright.sync_api import sync_playwright
 
 # ================= 設定項目 =================
 TARGET_URL = "https://rail-mtb.resv.jp/reserve/calendar.php?direct_id=8"
-TARGET_DATES = ["11/12", "11/13"]  # 監視したい日付
+TARGET_DATES = ["11/12", "11/13", "11/5"]  # 監視したい日付
 
 # GitHub SecretsからLINEのトークンを取得
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
