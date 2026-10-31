@@ -5,6 +5,9 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   check_vacancy:
     runs-on: ubuntu-latest
@@ -58,3 +61,17 @@ jobs:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           TZ: 'Asia/Tokyo'
         run: python monitor_gattango.py
+
+      - name: 通知済み状態の保存（変化があった時のみ）
+        if: steps.check_date.outputs.skip == 'false'
+        run: |
+          if [ -f notified_slots.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add notified_slots.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update notified slots state"
+              git pull --rebase
+              git push
+            fi
+          fi
