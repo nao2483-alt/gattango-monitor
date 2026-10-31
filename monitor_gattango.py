@@ -203,104 +203,82 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
     return result["found"], result["debugHeaders"], result["matchedDates"]
 
 
-def click_next_week_button(page) -> bool:
-    """画面内から『翌週 / Next / >』などの次週移動ボタンを探してクリックする"""
-    res = page.evaluate(
-        """() => {
-        const clickable = Array.from(document.querySelectorAll(
-            "a, button, input[type='button'], input[type='submit'], [onclick], [class*='next'], [id*='next'], [class*='right'], [class*='arrow'], li, span"
-        ));
+def click_next_week_button(page, prev_first_header: str) -> bool:
+    """『翌週』ボタン単体をピンポイントで探し出し、Playwrightで確実にクリックして画面更新を待つ"""
+    # 1. Playwrightのネイティブロケータで「翌週」単体の要素を探す（親要素を誤クリックしないよう文字数制限）
+    target_locator = None
+    matched_desc = ""
 
-        const navDebug = [];
+    # 候補となるセレクタを順番にチェック
+    selectors = [
+        "a:text-is('翌週')",
+        "button:text-is('翌週')",
+        "span:text-is('翌週')",
+        "li:text-is('翌週')",
+        "div:text-is('翌週')",
+        "input[value='翌週']",
+        "a:has-text('翌週')",
+        "button:has-text('翌週')",
+        "[onclick*='next']:has-text('翌週')",
+    ]
 
-        // 優先度1: テキストや属性に明確な「次週・翌週・Next」を含む要素
-        const textKeywords = [
-            "次の週", "翌週", "次週", "次の7日", "翌7日", "1週間後", "次へ",
-            "next week", "next 7", "next", "＞", ">", "≫", ">>", "▶", "→"
-        ];
+    for sel in selectors:
+        loc = page.locator(sel)
+        count = loc.count()
+        for i in range(count):
+            el = loc.nth(i)
+            if el.is_visible():
+                txt = (el.inner_text() or "").strip()
+                # 「翌月 翌週 前週 前月」のような親コンテナを除外し、8文字以下の単体ボタンのみ対象にする
+                if len(txt) <= 8:
+                    target_locator = el
+                    matched_desc = f"{sel} (text='{txt}')"
+                    break
+        if target_locator:
+            break
 
-        for (const el of clickable) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) continue;
-
-            const text = (el.innerText || el.value || "").trim().replace(/\\s+/g, " ");
-            const cls = (el.className && typeof el.className === "string") ? el.className : "";
-            const id = el.id || "";
-            const href = el.getAttribute("href") || "";
-            const onclick = el.getAttribute("onclick") || "";
-            const title = el.getAttribute("title") || "";
-            const img = el.querySelector("img");
-            const alt = img ? (img.getAttribute("alt") || "") : "";
-
-            // デバッグ用に短めのボタン・リンク情報を記録
-            if ((text && text.length < 20) || cls.toLowerCase().includes("next") || onclick) {
-                const info = `tag=${el.tagName} text='${text}' class='${cls}' id='${id}' onclick='${onclick}' href='${href}'`;
-                if (navDebug.length < 25 && !navDebug.includes(info)) {
-                    navDebug.push(info);
-                }
-            }
-        }
-
-        // 1. テキスト・alt・titleでの一致を探す
-        for (const kw of textKeywords) {
-            for (const el of clickable) {
+    if target_locator:
+        print(f"[DEBUG] 次の週のカレンダーへ移動します... (検出: {matched_desc})")
+        target_locator.click()
+    else:
+        # 2. フォールバック：JavaScriptで一番内側（最小サイズ）の「翌週」要素を探してクリック
+        js_res = page.evaluate(
+            """() => {
+            const all = Array.from(document.querySelectorAll("a, button, input, span, li, td, div"));
+            const matches = [];
+            for (const el of all) {
                 const rect = el.getBoundingClientRect();
                 if (rect.width === 0 || rect.height === 0) continue;
-
-                const text = (el.innerText || el.value || "").trim().replace(/\\s+/g, " ");
-                const title = el.getAttribute("title") || "";
-                const img = el.querySelector("img");
-                const alt = img ? (img.getAttribute("alt") || "") : "";
-                const combined = `${text} ${title} ${alt}`.toLowerCase();
-
-                if (kw === ">" || kw === "＞" || kw === ">>" || kw === "≫" || kw === "▶" || kw === "→") {
-                    if (text === kw || alt === kw) {
-                        el.click();
-                        return { clicked: true, reason: `symbol:${kw}`, debug: navDebug };
-                    }
-                } else if (combined.includes(kw) && text.length < 25) {
-                    el.click();
-                    return { clicked: true, reason: `keyword:${kw} (${text})`, debug: navDebug };
+                const txt = (el.innerText || el.value || "").trim().replace(/[\\s＞>»▶→]+/g, "");
+                if (txt === "翌週" || txt === "次の週" || txt === "次週" || txt.toLowerCase() === "nextweek") {
+                    matches.push({ el, area: rect.width * rect.height, tag: el.tagName, onclick: el.getAttribute("onclick") || "", href: el.getAttribute("href") || "" });
                 }
             }
-        }
-
-        // 2. class名・id・onclick・href に "next" や翌週移動らしき指定がある要素を探す
-        for (const el of clickable) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) continue;
-
-            const cls = ((el.className && typeof el.className === "string") ? el.className : "").toLowerCase();
-            const id = (el.id || "").toLowerCase();
-            const onclick = (el.getAttribute("onclick") || "").toLowerCase();
-            const href = (el.getAttribute("href") || "").toLowerCase();
-
-            if (
-                cls.includes("next") || id.includes("next") ||
-                onclick.includes("next") || href.includes("next") ||
-                onclick.includes("week") || onclick.includes("calendar") || onclick.includes("move")
-            ) {
-                // prev / back は除外
-                if (!cls.includes("prev") && !id.includes("prev") && !onclick.includes("prev") && !cls.includes("back")) {
-                    const targetEl = el.querySelector("a, button, input") || el;
-                    targetEl.click();
-                    return { clicked: true, reason: `attr:class=${cls}/id=${id}/onclick=${onclick}`, debug: navDebug };
-                }
+            // 面積が一番小さい（＝一番内側のボタンそのもの）を選択
+            matches.sort((a, b) => a.area - b.area);
+            if (matches.length > 0) {
+                const best = matches[0];
+                best.el.click();
+                return { clicked: true, info: `tag=${best.tag} onclick=${best.onclick} href=${best.href}` };
             }
-        }
+            return { clicked: false, info: "" };
+        }"""
+        )
+        if js_res["clicked"]:
+            print(f"[DEBUG] 次の週のカレンダーへ移動します... (JS最小要素検出: {js_res['info']})")
+        else:
+            print("[DEBUG] 『翌週』単体のボタンが見つかりませんでした。")
+            return False
 
-        return { clicked: false, reason: "not_found", debug: navDebug };
-    }"""
-    )
+    # 3. クリック後、カレンダーの先頭日付が切り替わるまで最大6秒間待機する
+    for _ in range(12):
+        page.wait_for_timeout(500)
+        _, current_headers, _ = extract_slots_from_page(page, [])
+        if current_headers and current_headers[0] != prev_first_header:
+            return True
 
-    if res["clicked"]:
-        print(f"[DEBUG] 次の週のカレンダーへ移動します... (検出方法: {res['reason']})")
-        return True
-    else:
-        print("[DEBUG] 次週へ進むボタンが見つかりませんでした。画面内のボタン候補一覧:")
-        for item in res["debug"][:15]:
-            print(f"  - {item}")
-        return False
+    page.wait_for_timeout(1500)
+    return True
 
 
 def check_availability() -> tuple[list[str], bool]:
@@ -310,7 +288,6 @@ def check_availability() -> tuple[list[str], bool]:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # 日本語環境(ja-JP)を指定して英語モードになるのを防ぐ
         context = browser.new_context(
             locale="ja-JP",
             timezone_id="Asia/Tokyo",
@@ -339,11 +316,8 @@ def check_availability() -> tuple[list[str], bool]:
                 if all(d in seen_target_dates for d in TARGET_DATES):
                     break
 
-                # 次週ボタンを探してクリック
-                if click_next_week_button(page):
-                    page.wait_for_load_state("networkidle")
-                    page.wait_for_timeout(2500)
-                else:
+                prev_first = debug_headers[0] if debug_headers else ""
+                if not click_next_week_button(page, prev_first):
                     print("[DEBUG] これ以上次の週へ進めないため移動を終了します。")
                     break
 
@@ -352,7 +326,6 @@ def check_availability() -> tuple[list[str], bool]:
         finally:
             browser.close()
 
-    # 監視対象日のすべてを画面上で確認できた場合のみ True とする
     is_success = all(d in seen_target_dates for d in TARGET_DATES)
     return found_slots, is_success
 
