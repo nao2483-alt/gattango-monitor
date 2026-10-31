@@ -1,0 +1,63 @@
+name: Gattan Go Vacancy Monitor
+
+on:
+  schedule:
+    # 5分おきに実行（UTC指定ですが5分間隔なので日本時間でも5分おきに動きます）
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # GitHubの画面から手動テスト実行できるようにする設定
+
+jobs:
+  check_vacancy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 11月13日を過ぎていたら実行をスキップ
+        id: check_date
+        run: |
+          CURRENT_DATE=$(TZ='Asia/Tokyo' date +'%Y%m%d')
+          if [ "$CURRENT_DATE" -gt "20261113" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: リポジトリのコードを取得
+        if: steps.check_date.outputs.skip == 'false'
+        uses: actions/checkout@v4
+
+      - name: Pythonのセットアップ
+        if: steps.check_date.outputs.skip == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Pythonライブラリのインストール
+        if: steps.check_date.outputs.skip == 'false'
+        run: pip install -r requirements.txt
+
+      - name: Playwrightブラウザのキャッシュ確認
+        if: steps.check_date.outputs.skip == 'false'
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+
+      - name: Playwrightブラウザ(Chromium)のインストール
+        if: steps.check_date.outputs.skip == 'false' && steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install --with-deps chromium
+
+      - name: PlaywrightのOS依存パッケージのみインストール（キャッシュヒット時）
+        if: steps.check_date.outputs.skip == 'false' && steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
+      - name: 空席監視スクリプトの実行
+        if: steps.check_date.outputs.skip == 'false'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          TZ: 'Asia/Tokyo'
+        run: python monitor_gattango.py
