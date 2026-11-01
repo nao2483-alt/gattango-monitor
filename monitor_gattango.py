@@ -1,6 +1,5 @@
 import json
 import os
-import re
 from datetime import datetime
 import requests
 from playwright.sync_api import sync_playwright
@@ -81,8 +80,9 @@ def send_line_notification(available_slots: list[str]):
 
 def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], list[str], list[str]]:
     """画面内のカレンダー表から、対象日付の列にある空き枠を抽出する"""
+    # Pythonのraw文字列(r"""...""")を使うことで、JavaScriptの正規表現エスケープが消えるのを防ぐ
     result = page.evaluate(
-        """(targetDates) => {
+        r"""(targetDates) => {
         const debugHeaders = [];
         const found = [];
         const matchedDates = [];
@@ -108,21 +108,31 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
         const matchedColumns = [];
 
         for (const el of candidates) {
-            const text = (el.innerText || "").trim().replace(/\\s+/g, " ");
+            const text = (el.innerText || "").trim().replace(/\s+/g, " ");
             if (!text || text.length > 25) continue;
 
             const rect = el.getBoundingClientRect();
             if (rect.width === 0 || rect.height === 0) continue;
 
-            if (/(?:\\d{1,2}[\\/月]\\d{1,2}|^\\d{1,2}(?:日)?\\s*[\\(（]?(?:[月火水木金土日]|Sun|Mon|Tue|Wed|Thu|Thr|Fri|Sat)[\\)）]?$)/i.test(text)) {
+            if (/(?:\d{1,2}[\/月]\d{1,2}|^\d{1,2}(?:日)?\s*[\(（]?(?:[月火水木金土日]|Sun|Mon|Tue|Wed|Thu|Thr|Fri|Sat)[\)）]?$)/i.test(text)) {
                 if (!debugHeaders.includes(text)) debugHeaders.push(text);
             }
 
             for (const t of targets) {
-                const regexFull = new RegExp(`(?:^|\\D)0?${t.m}[\\/月]0?${t.d}(?:日|\\D|$)`);
+                // "11/12(木)" などの先頭一致・部分一致を確実に判定
+                const exactPrefix1 = `${t.m}/${t.d}`;
+                const exactPrefix2 = `${t.m}月${t.d}日`;
+                const isDirectMatch = (
+                    text === exactPrefix1 ||
+                    text.startsWith(exactPrefix1 + "(") ||
+                    text.startsWith(exactPrefix1 + "（") ||
+                    text.startsWith(exactPrefix1 + " ") ||
+                    text.startsWith(exactPrefix2)
+                );
+
                 const regexDayOnly = new RegExp(`^0?${t.d}(?:日)?\\s*[\\(（](?:[月火水木金土日]|Sun|Mon|Tue|Wed|Thu|Thr|Fri|Sat)[\\)）]`, "i");
 
-                if (regexFull.test(text) || (hasMonth11 && regexDayOnly.test(text))) {
+                if (isDirectMatch || (hasMonth11 && regexDayOnly.test(text))) {
                     matchedColumns.push({
                         target: t,
                         headerText: text,
@@ -147,26 +157,26 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
 
                 const centerX = (rect.left + rect.right) / 2;
                 if (rect.top >= col.bottom - 5 && centerX >= col.left - 5 && centerX <= col.right + 5) {
-                    const cellText = (cell.innerText || "").trim().replace(/\\s+/g, " ");
+                    const cellText = (cell.innerText || "").trim().replace(/\s+/g, " ");
                     if (!cellText || cellText.length > 35) continue;
 
-                    if (/^[×✕xX－\\-休満問]+$/.test(cellText) || cellText.includes("満席") || cellText.includes("終了") || cellText.toLowerCase().includes("full")) {
+                    if (/^[×✕xX－\-休満問]+$/.test(cellText) || cellText.includes("満席") || cellText.includes("終了") || cellText.toLowerCase().includes("full")) {
                         continue;
                     }
 
                     const hasLink = cell.tagName.toLowerCase() === "a" || cell.querySelector("a") !== null;
-                    const hasAvailMark = /(残\\s*\\d+|○|◯|△|空|予約|left|avail)/i.test(cellText);
+                    const hasAvailMark = /(残\s*\d+|○|◯|△|空|予約|left|avail)/i.test(cellText);
 
                     if (hasAvailMark || (hasLink && /[0-9○◯△残]/.test(cellText))) {
                         let timeStr = "";
                         const row = cell.closest("tr");
                         if (row && row.cells && row.cells.length > 0) {
-                            const firstCellText = (row.cells[0].innerText || "").trim().replace(/\\s+/g, " ");
+                            const firstCellText = (row.cells[0].innerText || "").trim().replace(/\s+/g, " ");
                             if (firstCellText && firstCellText !== cellText && firstCellText.length < 25) {
                                 timeStr = firstCellText;
                             }
                         }
-                        const slotDesc = `${col.target.raw} ${timeStr} (${cellText})`.replace(/\\s+/g, " ").trim();
+                        const slotDesc = `${col.target.raw} ${timeStr} (${cellText})`.replace(/\s+/g, " ").trim();
                         if (!found.includes(slotDesc)) {
                             found.push(slotDesc);
                         }
@@ -181,8 +191,8 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
             const attrText = (link.getAttribute("href") || "") + " " + (link.getAttribute("onclick") || "") + " " + (link.innerText || "");
             for (const t of targets) {
                 if (attrText.includes(t.ymd1) || attrText.includes(t.ymd2)) {
-                    const clean = (link.innerText || "").trim().replace(/\\s+/g, " ");
-                    if (clean && !/^[×✕xX－\\-]+$/.test(clean) && clean.length < 35) {
+                    const clean = (link.innerText || "").trim().replace(/\s+/g, " ");
+                    if (clean && !/^[×✕xX－\-]+$/.test(clean) && clean.length < 35) {
                         const slotDesc = `${t.raw} (${clean})`;
                         if (!found.includes(slotDesc)) {
                             found.push(slotDesc);
@@ -205,11 +215,9 @@ def extract_slots_from_page(page, target_dates: list[str]) -> tuple[list[str], l
 
 def click_next_week_button(page, prev_first_header: str) -> bool:
     """『翌週』ボタン単体をピンポイントで探し出し、Playwrightで確実にクリックして画面更新を待つ"""
-    # 1. Playwrightのネイティブロケータで「翌週」単体の要素を探す（親要素を誤クリックしないよう文字数制限）
     target_locator = None
     matched_desc = ""
 
-    # 候補となるセレクタを順番にチェック
     selectors = [
         "a:text-is('翌週')",
         "button:text-is('翌週')",
@@ -219,7 +227,6 @@ def click_next_week_button(page, prev_first_header: str) -> bool:
         "input[value='翌週']",
         "a:has-text('翌週')",
         "button:has-text('翌週')",
-        "[onclick*='next']:has-text('翌週')",
     ]
 
     for sel in selectors:
@@ -229,7 +236,6 @@ def click_next_week_button(page, prev_first_header: str) -> bool:
             el = loc.nth(i)
             if el.is_visible():
                 txt = (el.inner_text() or "").strip()
-                # 「翌月 翌週 前週 前月」のような親コンテナを除外し、8文字以下の単体ボタンのみ対象にする
                 if len(txt) <= 8:
                     target_locator = el
                     matched_desc = f"{sel} (text='{txt}')"
@@ -241,36 +247,10 @@ def click_next_week_button(page, prev_first_header: str) -> bool:
         print(f"[DEBUG] 次の週のカレンダーへ移動します... (検出: {matched_desc})")
         target_locator.click()
     else:
-        # 2. フォールバック：JavaScriptで一番内側（最小サイズ）の「翌週」要素を探してクリック
-        js_res = page.evaluate(
-            """() => {
-            const all = Array.from(document.querySelectorAll("a, button, input, span, li, td, div"));
-            const matches = [];
-            for (const el of all) {
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
-                const txt = (el.innerText || el.value || "").trim().replace(/[\\s＞>»▶→]+/g, "");
-                if (txt === "翌週" || txt === "次の週" || txt === "次週" || txt.toLowerCase() === "nextweek") {
-                    matches.push({ el, area: rect.width * rect.height, tag: el.tagName, onclick: el.getAttribute("onclick") || "", href: el.getAttribute("href") || "" });
-                }
-            }
-            // 面積が一番小さい（＝一番内側のボタンそのもの）を選択
-            matches.sort((a, b) => a.area - b.area);
-            if (matches.length > 0) {
-                const best = matches[0];
-                best.el.click();
-                return { clicked: true, info: `tag=${best.tag} onclick=${best.onclick} href=${best.href}` };
-            }
-            return { clicked: false, info: "" };
-        }"""
-        )
-        if js_res["clicked"]:
-            print(f"[DEBUG] 次の週のカレンダーへ移動します... (JS最小要素検出: {js_res['info']})")
-        else:
-            print("[DEBUG] 『翌週』単体のボタンが見つかりませんでした。")
-            return False
+        print("[DEBUG] 『翌週』単体のボタンが見つかりませんでした。")
+        return False
 
-    # 3. クリック後、カレンダーの先頭日付が切り替わるまで最大6秒間待機する
+    # クリック後、カレンダーの先頭日付が切り替わるまで最大6秒間待機する
     for _ in range(12):
         page.wait_for_timeout(500)
         _, current_headers, _ = extract_slots_from_page(page, [])
@@ -312,8 +292,9 @@ def check_availability() -> tuple[list[str], bool]:
 
                 seen_target_dates.update(matched_dates)
 
-                # TARGET_DATES（11/12と11/13）の両方が画面で確認できたら完了
+                # TARGET_DATES（11/12と11/13）の両方が画面で確認できたら即座にループ終了
                 if all(d in seen_target_dates for d in TARGET_DATES):
+                    print(f"[DEBUG] 監視対象日 ({', '.join(TARGET_DATES)}) の確認が完了しました。")
                     break
 
                 prev_first = debug_headers[0] if debug_headers else ""
